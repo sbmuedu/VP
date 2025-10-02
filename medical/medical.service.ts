@@ -448,9 +448,9 @@ export class MedicalService {
         },
         scenario: {
           select: {
-            medicalCondition: true,
-            patientAllergies: true,
-            contraindications: true,
+            chiefComplaint: true,        // Use instead of medicalCondition
+            allergies: true,             // Use instead of patientAllergies
+            pastMedicalHistory: true,    // Contains contraindication info
           },
         },
       },
@@ -462,11 +462,11 @@ export class MedicalService {
 
     // Get current active medications from the session
     const activeMedications = session.medicationOrders
-      .filter((order:any) => order.status !== 'CANCELLED')
-      .map((order:any) => order.drug);
+      .filter((order: any) => order.status !== 'CANCELLED')
+      .map((order: any) => order.drug);
 
     // Combine with new drugs to check
-    const allDrugsToCheck = [...activeMedications.map((d:any) => d.id), ...drugIds];
+    const allDrugsToCheck = [...activeMedications.map((d: any) => d.id), ...drugIds];
     const uniqueDrugs = [...new Set(allDrugsToCheck)];
 
     return this.checkDrugInteractions(uniqueDrugs, session.scenario);
@@ -506,7 +506,7 @@ export class MedicalService {
         category: true,
         contraindications: true,
         interactions: true,
-        blackBoxWarning: true,
+        monitoringParameters: true,
       },
     });
 
@@ -535,8 +535,8 @@ export class MedicalService {
 
     // Check for black box warnings
     const blackBoxWarnings = drugs
-      .filter((drug:any) => drug.blackBoxWarning)
-      .map((drug:any) => `Black box warning: ${drug.name} - ${drug.blackBoxWarning}`);
+      .filter((drug: any) => drug.blackBoxWarning)
+      .map((drug: any) => `Black box warning: ${drug.name} - ${drug.blackBoxWarning}`);
     warnings.push(...blackBoxWarnings);
 
     return {
