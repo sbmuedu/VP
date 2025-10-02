@@ -5,7 +5,7 @@ import {
   ForbiddenException,
   BadRequestException
 } from '@nestjs/common';
-import { PrismaService } from '../database/prisma.service';
+import { PrismaService } from '../prisma/prisma.service';
 import { RealTimeService } from '../real-time/real-time.service';
 import {
   CreateMedicationOrderDto,

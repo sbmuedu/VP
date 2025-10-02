@@ -1,6 +1,6 @@
 // src/assessment/engines/competency-calculator.service.ts
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../../database/prisma.service';
+import { PrismaService } from '../../prisma/prisma.service';
 import { AssessmentContext, CompetencyScores } from './assessment-engine.service';
 
 @Injectable()

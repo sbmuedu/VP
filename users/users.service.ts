@@ -4,7 +4,7 @@ import {
   ForbiddenException,
   ConflictException 
 } from '@nestjs/common';
-import { PrismaService } from '../database/prisma.service';
+import { PrismaService } from '../prisma/prisma.service';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { User, UserRole } from 'sharedtypes/dist';
 

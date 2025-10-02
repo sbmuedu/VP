@@ -5,7 +5,7 @@ import {
   BadRequestException,
   ConflictException,
 } from "@nestjs/common";
-import { PrismaService } from "../database/prisma.service";
+import { PrismaService } from "../prisma/prisma.service";
 import { LLMService } from "../llm/llm.service";
 import {
   StartSessionDto,

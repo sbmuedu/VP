@@ -2,7 +2,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { PrismaService } from '../../database/prisma.service';
+import { PrismaService } from '../../prisma/prisma.service';
 
 /**
  * JWT Strategy for Passport.js authentication

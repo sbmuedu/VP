@@ -3,7 +3,7 @@ import { HttpModule } from '@nestjs/axios';
 import { ConfigModule } from '@nestjs/config';
 import { LLMService } from './llm.service';
 import { LLMController } from './llm.controller';
-import { DatabaseModule } from '../database/database.module';
+import { DatabaseModule } from '../prisma/prisma.module';
 
 /**
  * LLM Module

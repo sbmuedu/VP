@@ -3,7 +3,7 @@ import { Module } from '@nestjs/common';
 import { MedicalService } from './medical.service';
 import { MedicalController } from './medical.controller';
 // import { PrismaModule } from '../database/prisma.module';    reza
-import { DatabaseModule as  PrismaModule } from '../database/database.module';
+import { DatabaseModule as  PrismaModule } from '../prisma/prisma.module';
 import { LLMModule } from '../llm/llm.module';
 
 @Module({

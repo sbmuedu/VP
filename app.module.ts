@@ -10,7 +10,7 @@ import { MedicalModule } from './medical/medical.module';
 import { AssessmentModule } from './assessment/assessment.module';
 import { LLMModule } from './llm/llm.module';
 import { RealTimeModule } from './real-time/real-time.module';
-import { DatabaseModule } from './database/database.module';
+import { DatabaseModule } from './prisma/prisma.module';
 
 import { APP_GUARD } from '@nestjs/core';
 import configuration from './config/configuration';

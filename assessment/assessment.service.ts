@@ -1,6 +1,6 @@
 // src/assessment/assessment.service.ts
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { PrismaService } from '../database/prisma.service';
+import { PrismaService } from '../prisma/prisma.service';
 import { AssessmentEngineService } from './engines/assessment-engine.service';
 import { 
   RealTimeFeedbackRequestDto,

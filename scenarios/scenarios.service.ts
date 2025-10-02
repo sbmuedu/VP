@@ -5,7 +5,7 @@ import {
   ConflictException,
   BadRequestException
 } from '@nestjs/common';
-import { PrismaService } from '../database/prisma.service';
+import { PrismaService } from '../prisma/prisma.service';
 import { CreateScenarioDto, UpdateScenarioDto, ScenarioFiltersDto } from './dto';
 import {
   UserRole,

@@ -1,6 +1,6 @@
 // src/assessment/engines/assessment-engine.service.ts
 import { Injectable, Logger } from '@nestjs/common';
-import { PrismaService } from '../../database/prisma.service';
+import { PrismaService } from '../../prisma/prisma.service';
 import { CompetencyCalculatorService } from './competency-calculator.service';
 import { FeedbackGeneratorService } from './feedback-generator.service';
 import { DebriefEngineService } from './debrief-engine.service';
