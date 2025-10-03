@@ -96,7 +96,7 @@ export class UsersService {
 
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { password: _, ...userWithoutPassword } = user;
-    return userWithoutPassword;
+    return userWithoutPassword as any;
   }
 
   /**
@@ -117,7 +117,7 @@ export class UsersService {
 
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { password: _, ...userWithoutPassword } = user;
-    return userWithoutPassword;
+    return userWithoutPassword as any;
   }
 
   /**
@@ -166,7 +166,7 @@ export class UsersService {
 
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { password: _, ...userWithoutPassword } = updatedUser;
-    return userWithoutPassword;
+    return userWithoutPassword as any;
   }
 
   /**

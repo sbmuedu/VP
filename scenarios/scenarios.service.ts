@@ -53,10 +53,11 @@ export class ScenariosService {
         ...createScenarioDto,
         createdBy: userId,
         // Set default values if not provided
-        timeAccelerationRate: createScenarioDto.timeAccelerationRate || 60,
-        requiresTimePressure: createScenarioDto.requiresTimePressure || false,
-        version: 1.0,
-        isActive: true,
+        competencyWeights: createScenarioDto.competencyWeights as any, // Cast to any for Json
+        // timeAccelerationRate: createScenarioDto.timeAccelerationRate || 60,
+        // requiresTimePressure: createScenarioDto.requiresTimePressure || false,
+        // version: 1.0,
+        // isActive: true,
       },
       include: {
         creator: {
@@ -72,7 +73,7 @@ export class ScenariosService {
       },
     });
 
-    return scenario as MedicalScenario;
+    return scenario; // as MedicalScenario;
   }
 
   /**
@@ -97,7 +98,7 @@ export class ScenariosService {
       this.prisma.medicalScenario.findMany({
         where,
         skip,
-        take: limit,
+        take: limit || 10,
         include: {
           creator: {
             select: {
@@ -195,7 +196,7 @@ export class ScenariosService {
     // Check access permissions
     this.checkScenarioAccess(scenario, userId, userRole);
 
-    return scenario as MedicalScenario;
+    return scenario; // as MedicalScenario;
   }
 
   /**

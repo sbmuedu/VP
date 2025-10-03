@@ -100,8 +100,8 @@ export class SessionsService {
       data: {
         scenarioId,
         studentId,
-        supervisorId: startSessionDto.supervisorId,
-        assessmentType: startSessionDto.assessmentType,
+        supervisorId: startSessionDto.supervisorId ?? null,
+        // assessmentType: startSessionDto.assessmentType ,
         status: SessionStatus.ACTIVE,
         startTime: new Date(),
         currentVirtualTime: new Date(), // Start at current real time
@@ -110,9 +110,9 @@ export class SessionsService {
         totalRealTimeElapsed: 0,
         totalVirtualTimeElapsed: 0,
         timePressureEnabled: scenario.requiresTimePressure,
-        currentPatientState: initialPatientState,
+        currentPatientState: initialPatientState as any,
         currentEmotionalState: scenario.initialEmotionalState,
-        latestVitalSigns: scenario.initialVitalSigns,
+        latestVitalSigns: scenario.initialVitalSigns as any,
         completedSteps: [],
         activeMedications: [],
         complicationsEncountered: [],
@@ -281,6 +281,7 @@ export class SessionsService {
   }> {
     const session = await this.prisma.scenarioSession.findUnique({
       where: { id: sessionId },
+      include: {scenario: true},
     });
 
     if (!session) {
@@ -340,7 +341,7 @@ export class SessionsService {
 
     // Calculate real time elapsed during fast-forward
     const realTimeElapsed = this.calculateRealTimeElapsed(
-      session.timeAccelerationRate,
+      session.scenario.timeAccelerationRate,
       fastForwardDto.virtualMinutes
     );
 
@@ -440,6 +441,7 @@ export class SessionsService {
         virtualTimestamp: session.currentVirtualTime,
         medicalAccuracy: llmResponse.medicalAccuracy,
         appropriateness: llmResponse.educationalValue,
+        realTimeSpent: 10 //reza unknown
       },
     });
 

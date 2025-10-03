@@ -11,6 +11,7 @@ import {
   HttpStatus,
   HttpCode,
   Query,
+  BadRequestException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -142,19 +143,29 @@ export class MedicalController {
     return progression;
   }
 
-  @Post('sessions/:sessionId/simulate-complication')
-  @Roles(UserRole.SUPERVISOR, UserRole.MEDICAL_EXPERT, UserRole.ADMIN)
-  @ApiOperation({ summary: 'Simulate a specific complication (for training purposes)' })
-  @ApiParam({ name: 'sessionId', description: 'Session ID' })
-  @ApiResponse({ status: 200, description: 'Complication simulated successfully' })
-  @ApiResponse({ status: 400, description: 'Invalid input or session not active' })
-  @ApiResponse({ status: 403, description: 'Access denied' })
-  @ApiResponse({ status: 404, description: 'Session not found' })
+  /**
+   * SIMULATE COMPLICATION ENDPOINT
+   * 
+   * POST /medical/sessions/:sessionId/complications
+   * 
+   * Triggers a simulated medical complication for training purposes.
+   * Used to test student emergency response skills.
+   */
+  //reza removed from old one
+  // @Roles(UserRole.SUPERVISOR, UserRole.MEDICAL_EXPERT, UserRole.ADMIN)
+  // @ApiOperation({ summary: 'Simulate a specific complication (for training purposes)' })
+  // @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  // @ApiResponse({ status: 200, description: 'Complication simulated successfully' })
+  // @ApiResponse({ status: 400, description: 'Invalid input or session not active' })
+  // @ApiResponse({ status: 403, description: 'Access denied' })
+  // @ApiResponse({ status: 404, description: 'Session not found' })
+  @Post('sessions/:sessionId/complications')
   async simulateComplication(
-    @Param('sessionId', ParseUUIDPipe) sessionId: string,
-    @Body() complicationData: { type: string; severity: number; timing?: string },
+    @Param('sessionId') sessionId: string,
+    @Body() complicationData: any,
     @Request() req: any,
   ) {
+    console.log(`Simulating complication in session ${sessionId}:`, complicationData);
     return this.medicalService.simulateComplication(
       sessionId,
       complicationData.type,
@@ -162,47 +173,79 @@ export class MedicalController {
       complicationData.timing ? new Date(complicationData.timing) : undefined,
     );
   }
-
+  /**
+ * GET AVAILABLE COMPLICATIONS ENDPOINT
+ * 
+ * GET /medical/sessions/:sessionId/available-complications
+ * 
+ * Returns complications that can be simulated in the current session
+ * based on the scenario context.
+ */
+  // reza removed from old one
+  // @Roles(UserRole.SUPERVISOR, UserRole.MEDICAL_EXPERT, UserRole.ADMIN)
+  // @ApiOperation({ summary: 'Get available complication types for a session' })
+  // @ApiParam({ name: 'sessionId', description: 'Session ID' })
+  // @ApiResponse({ status: 200, description: 'Available complications retrieved' })
+  // @ApiResponse({ status: 403, description: 'Access denied' })
+  // @ApiResponse({ status: 404, description: 'Session not found' })
   @Get('sessions/:sessionId/available-complications')
-  @Roles(UserRole.SUPERVISOR, UserRole.MEDICAL_EXPERT, UserRole.ADMIN)
-  @ApiOperation({ summary: 'Get available complication types for a session' })
-  @ApiParam({ name: 'sessionId', description: 'Session ID' })
-  @ApiResponse({ status: 200, description: 'Available complications retrieved' })
-  @ApiResponse({ status: 403, description: 'Access denied' })
-  @ApiResponse({ status: 404, description: 'Session not found' })
   async getAvailableComplications(
-    @Param('sessionId', ParseUUIDPipe) sessionId: string,
+    @Param('sessionId') sessionId: string,
     @Request() req: any,
   ) {
     return this.medicalService.getAvailableComplications(sessionId);
   }
-
- @Get('drug-interactions')
-@Roles(UserRole.STUDENT, UserRole.SUPERVISOR, UserRole.MEDICAL_EXPERT)
-@ApiOperation({ summary: 'Check for drug interactions between multiple medications' })
-@ApiResponse({ status: 200, description: 'Drug interactions checked successfully' })
-@ApiResponse({ status: 400, description: 'Invalid drug IDs' })
-async checkDrugInteractions(
-  @Query('drugIds') drugIds: string[],
-  @Query('sessionId') sessionId?: string,
-) {
-  if (sessionId) {
-    return this.medicalService.checkSessionDrugInteractions(sessionId, drugIds);
-  } else {
-    return this.medicalService.checkGeneralDrugInteractions(drugIds);
+  /**
+   * CHECK DRUG INTERACTIONS ENDPOINT
+   * 
+   * GET /medical/drug-interactions
+   * 
+   * Checks for drug interactions either in session context or generally.
+   * Supports both session-specific and general drug interaction checking.
+   */
+  // reza removed from old one
+  // @Roles(UserRole.STUDENT, UserRole.SUPERVISOR, UserRole.MEDICAL_EXPERT)
+  // @ApiOperation({ summary: 'Check for drug interactions between multiple medications' })
+  // @ApiResponse({ status: 200, description: 'Drug interactions checked successfully' })
+  // @ApiResponse({ status: 400, description: 'Invalid drug IDs' })
+  @Get('drug-interactions')
+  async checkDrugInteractions(
+    @Query('sessionId') sessionId?: string,
+    @Query('drugIds') drugIds?: string[],
+  ) {
+    if (sessionId) {
+      // Session-specific drug interaction check
+      return this.medicalService.checkSessionDrugInteractions(sessionId, drugIds);
+    } else if (drugIds && drugIds.length > 0) {
+      // General drug interaction check
+      return this.medicalService.checkGeneralDrugInteractions(drugIds);
+    } else {
+      throw new BadRequestException(
+        'Either sessionId or drugIds query parameter is required'
+      );
+    }
   }
-}
-
-@Get('clinical-guidelines/:condition')
-@Roles(UserRole.STUDENT, UserRole.SUPERVISOR, UserRole.MEDICAL_EXPERT)
-@ApiOperation({ summary: 'Get clinical guidelines for a specific condition' })
-@ApiParam({ name: 'condition', description: 'Medical condition' })
-@ApiResponse({ status: 200, description: 'Guidelines retrieved successfully' })
-async getClinicalGuidelines(
-  @Param('condition') condition: string,
-) {
-  return this.medicalService.getClinicalGuidelines(condition);
-}
+  
+  /**
+   * GET CLINICAL GUIDELINES ENDPOINT
+   * 
+   * GET /medical/guidelines/:condition
+   * 
+   * Returns evidence-based clinical guidelines for a medical condition.
+   * Used for educational reference and decision support.
+   */
+  // reza removed from old one
+  // @Roles(UserRole.STUDENT, UserRole.SUPERVISOR, UserRole.MEDICAL_EXPERT)
+  // @ApiOperation({ summary: 'Get clinical guidelines for a specific condition' })
+  // @ApiParam({ name: 'condition', description: 'Medical condition' })
+  // @ApiResponse({ status: 200, description: 'Guidelines retrieved successfully' })
+  @Get('guidelines/:condition')
+  async getClinicalGuidelines(
+    @Param('condition') condition: string,
+  ) {
+    console.log(`Fetching clinical guidelines for condition: ${condition}`);
+    return this.medicalService.getClinicalGuidelines(condition);
+  }
 
   // Private helper methods for the controller
   private calculateProgressionStage(session: any): string {

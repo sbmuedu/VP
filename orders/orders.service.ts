@@ -65,13 +65,13 @@ export class OrdersService {
         sessionId,
         drugId: createOrderDto.drugId,
         prescribedById: userId,
-        dosage: createOrderDto.dosage,
+        dosage: createOrderDto.dosage.toString(),
         frequency: createOrderDto.frequency,
         route: createOrderDto.route,
         duration: createOrderDto.duration,
         instructions: createOrderDto.instructions,
         priority: createOrderDto.priority,
-        status: OrderStatus.PENDING,
+        status: 'PENDING', // OrderStatus.PENDING,
         scheduledTime: createOrderDto.scheduledTime,
         virtualTimeScheduled: session.currentVirtualTime,
       },
@@ -120,7 +120,7 @@ export class OrdersService {
     const session = await this.verifySessionAccess(sessionId, userId, userRole);
 
     // Verify test exists
-    const test = await this.prisma.labTest.findUnique({
+    const test = await this.prisma.laboratoryTest.findUnique({
       where: { id: createOrderDto.testId },
     });
 
@@ -184,7 +184,7 @@ export class OrdersService {
     const session = await this.verifySessionAccess(sessionId, userId, userRole);
 
     // Verify procedure exists
-    const procedure = await this.prisma.medicalProcedure.findUnique({
+    const procedure = await this.prisma.procedure.findUnique({
       where: { id: createOrderDto.procedureId },
     });
 
@@ -291,8 +291,9 @@ export class OrdersService {
           },
           include: {
             drug: true,
-            prescribedBy: true,
-            administeredBy: true,
+            student: { // Use student instead of prescribedBy
+              select: { id: true, firstName: true, lastName: true }
+            }, administeredBy: true,
           },
         });
         break;
@@ -375,7 +376,7 @@ export class OrdersService {
           prescribedBy: true,
           administeredBy: true,
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { orderTime: 'desc' },
       }),
       this.prisma.labOrder.findMany({
         where: {
@@ -387,7 +388,7 @@ export class OrdersService {
           orderedBy: true,
           collectedBy: true,
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { orderTime: 'desc' },
       }),
       this.prisma.procedureOrder.findMany({
         where: {
@@ -399,7 +400,7 @@ export class OrdersService {
           orderedBy: true,
           performedBy: true,
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { orderTime: 'desc' },
       }),
     ]);
 
