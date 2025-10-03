@@ -2,7 +2,7 @@
 import { Module } from '@nestjs/common';
 import { OrdersService } from './orders.service';
 import { OrdersController } from './orders.controller';
-import { PrismaModule } from '../database/prisma.module';
+import { PrismaModule } from '../prisma/prisma.module';
 import { RealTimeModule } from '../real-time/real-time.module';
 
 @Module({

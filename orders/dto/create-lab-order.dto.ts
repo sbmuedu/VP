@@ -4,9 +4,10 @@ import {
   IsEnum, 
   IsOptional, 
   IsObject,
-  IsArray 
+  IsArray, 
+  IsBoolean
 } from 'class-validator';
-import { OrderPriority } from '@BackEnd/sharedTypes';
+import { EventPriority, OrderPriority } from '@BackEnd/sharedTypes';
 
 export class CreateLabOrderDto {
   @IsString()
@@ -31,4 +32,14 @@ export class CreateLabOrderDto {
   @IsOptional()
   @IsObject()
   specialInstructions?: Record<string, any>;
+  
+  @IsString()
+  indication: string='';
+
+  @IsEnum(EventPriority)
+  urgency: EventPriority | undefined;
+
+  @IsOptional()
+  @IsBoolean()
+  statOrder?: boolean;
 }

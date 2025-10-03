@@ -1,122 +1,176 @@
+// src/sessions/sessions.service.ts
+
 import {
   Injectable,
   NotFoundException,
-  ForbiddenException,
   BadRequestException,
-  ConflictException,
-} from "@nestjs/common";
-import { PrismaService } from "../prisma/prisma.service";
-import { LLMService } from "../llm/llm.service";
+  ForbiddenException,
+  Logger
+} from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
+import { LLMService } from '../llm/llm.service';
 import {
-  StartSessionDto,
-  FastForwardDto,
-  PatientQuestionDto,
-  PerformActionDto,
-} from "./dto";
-import {
-  UserRole,
   ScenarioSession,
+  MedicalScenario,
+  User,
   SessionStatus,
   TimeFlowMode,
-  ActionStatus,
-  PatientState,
-  VitalSigns,
+  AssessmentType,
   EmotionalState,
-  TimeEvent,
-} from "sharedtypes/dist";
+  ActionStatus,
+  EventPriority,
+  UserRole,
+} from '@prisma/client';
+
+// Import DTOs
+import {
+  StartSessionDto,
+  PerformActionDto,
+  FastForwardDto,
+  PatientQuestionDto,
+  EndSessionDto,
+  UpdateTimeFlowModeDto,
+  AddSupervisorDto,
+  CreateInterventionDto,
+} from './dto/sessions.dto';
 
 /**
- * Sessions Service
- * Handles scenario session management, time control, patient interactions, and medical actions
+ * SESSION WITH SCENARIO TYPE
+ * 
+ * Extended type that includes related scenario and user information.
+ * Used for type-safe return values from session queries.
+ */
+type SessionWithScenario = ScenarioSession & {
+  scenario: MedicalScenario & {
+    creator: Pick<User, 'id' | 'firstName' | 'lastName' | 'specialization'>;
+  };
+  student: Pick<User, 'id' | 'firstName' | 'lastName' | 'email' | 'role'>;
+  supervisor?: Pick<User, 'id' | 'firstName' | 'lastName' | 'email' | 'role'>;
+};
+
+/**
+ * SESSIONS SERVICE
+ * 
+ * Core service responsible for managing medical training sessions.
+ * Handles session lifecycle, medical actions, time management, and LLM integration.
+ * 
+ * KEY RESPONSIBILITIES:
+ * - Session creation and lifecycle management
+ * - Medical action processing and simulation
+ * - Virtual time management
+ * - Patient communication via LLM
+ * - Supervisor interventions
+ * - Session assessment and feedback
+ * 
+ * @Injectable Decorator allows this service to be injected into controllers
  */
 @Injectable()
 export class SessionsService {
-  constructor(private prisma: PrismaService, private llmService: LLMService) {}
+  private readonly logger = new Logger(SessionsService.name);
 
   /**
-   * Starts a new scenario session for a student
-   * @param scenarioId - ID of the scenario to start
-   * @param studentId - ID of the student starting the session
-   * @param startSessionDto - Session configuration
-   * @returns Newly created session with initial patient state
+   * SERVICE CONSTRUCTOR
+   * 
+   * Dependency injection of required services:
+   * - PrismaService: Database operations and data access
+   * - LLMService: AI-powered patient responses and medical reasoning
+   * 
+   * @param prisma - Database service for all data operations
+   * @param llmService - AI service for patient simulation and medical reasoning
    */
-  async startSession(
-    scenarioId: string,
-    studentId: string,
-    startSessionDto: StartSessionDto
-  ): Promise<{ session: ScenarioSession; patientState: PatientState }> {
-    // Verify scenario exists and is accessible
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly llmService: LLMService,
+  ) {
+    this.logger.log('SessionsService initialized');
+  }
+
+  /**
+   * START A NEW MEDICAL TRAINING SESSION
+   * 
+   * Creates a new training session based on a medical scenario.
+   * Initializes patient state, sets up timing, and prepares the learning environment.
+   * 
+   * WORKFLOW:
+   * 1. Validate scenario existence and accessibility
+   * 2. Check for existing active sessions
+   * 3. Create initial patient state from scenario
+   * 4. Create session record with initial state
+   * 5. Return session with related data
+   * 
+   * @param userId - ID of the student starting the session
+   * @param startSessionDto - DTO containing scenario and assessment information
+   * @returns Complete session object with scenario and student data
+   * @throws NotFoundException if scenario doesn't exist or is inactive
+   * @throws BadRequestException if user already has an active session
+   */
+  async startSession(userId: string, startSessionDto: StartSessionDto): Promise<SessionWithScenario> {
+    this.logger.log(`Starting new session for user ${userId} with scenario ${startSessionDto.scenarioId}`);
+
+    // Step 1: Verify scenario exists and is accessible
     const scenario = await this.prisma.medicalScenario.findUnique({
       where: {
-        id: scenarioId,
-        isActive: true,
+        id: startSessionDto.scenarioId,
+        isActive: true
       },
     });
 
     if (!scenario) {
-      throw new NotFoundException(
-        `Scenario with ID ${scenarioId} not found or inactive`
-      );
+      this.logger.warn(`Scenario not found or inactive: ${startSessionDto.scenarioId}`);
+      throw new NotFoundException('Scenario not found or inactive');
     }
 
-    // Check if student already has an active session for this scenario
-    const existingActiveSession = await this.prisma.scenarioSession.findFirst({
+    // Step 2: Check for existing active sessions
+    const existingSession = await this.prisma.scenarioSession.findFirst({
       where: {
-        scenarioId,
-        studentId,
+        studentId: userId,
         status: { in: [SessionStatus.ACTIVE, SessionStatus.PAUSED] },
       },
     });
 
-    if (existingActiveSession) {
-      throw new ConflictException(
-        "Student already has an active session for this scenario"
+    if (existingSession) {
+      this.logger.warn(`User ${userId} already has active session: ${existingSession.id}`);
+      throw new BadRequestException(
+        'You already have an active session. Please end it before starting a new one.'
       );
     }
 
-    // Verify supervisor if provided
-    if (startSessionDto.supervisorId) {
-      const supervisor = await this.prisma.user.findUnique({
-        where: {
-          id: startSessionDto.supervisorId,
-          role: {
-            in: [UserRole.SUPERVISOR, UserRole.MEDICAL_EXPERT, UserRole.ADMIN],
-          },
-        },
-      });
-
-      if (!supervisor) {
-        throw new BadRequestException(
-          "Invalid supervisor ID or insufficient permissions"
-        );
-      }
-    }
-
-    // Create initial patient state from scenario
+    // Step 3: Create initial patient state from scenario (FIXED JSON)
     const initialPatientState = this.createInitialPatientState(scenario);
 
-    // Create new session
+    // Ensure vital signs are proper JSON
+    const initialVitalSigns = scenario.initialVitalSigns
+      ? JSON.parse(JSON.stringify(scenario.initialVitalSigns))
+      : {};
+
+    // Step 4: Create new session record (FIXED JSON fields)
     const session = await this.prisma.scenarioSession.create({
       data: {
-        scenarioId,
-        studentId,
-        supervisorId: startSessionDto.supervisorId ?? null,
-        // assessmentType: startSessionDto.assessmentType ,
-        status: SessionStatus.ACTIVE,
-        startTime: new Date(),
-        currentVirtualTime: new Date(), // Start at current real time
+        scenarioId: startSessionDto.scenarioId,
+        studentId: userId,
+        assessmentType: startSessionDto.assessmentType,
+        currentVirtualTime: new Date(),
         lastRealTimeUpdate: new Date(),
         timeFlowMode: TimeFlowMode.REAL_TIME,
+        currentPatientState: initialPatientState, // Now proper JSON
+        currentEmotionalState: scenario.initialEmotionalState,
+        latestVitalSigns: initialVitalSigns, // Now proper JSON
+        completedSteps: [],
+        complicationsEncountered: [],
+        timePressureEnabled: scenario.requiresTimePressure,
+        // Initialize other required fields
         totalRealTimeElapsed: 0,
         totalVirtualTimeElapsed: 0,
-        timePressureEnabled: scenario.requiresTimePressure,
-        currentPatientState: initialPatientState as any,
-        currentEmotionalState: scenario.initialEmotionalState,
-        latestVitalSigns: scenario.initialVitalSigns as any,
-        completedSteps: [],
-        activeMedications: [],
-        complicationsEncountered: [],
-        competencyScores: this.createInitialCompetencyScores(),
+        mistakesMade: null,
+        interventionsReceived: null,
+        activeMedications: null,
+        competencyScores: null,
+        overallScore: null,
+        timeEfficiencyScore: null,
+        stressPerformanceScore: null,
+        finalFeedback: null,
+        parentSessionId: null,
+        userId: null, // Add this if your schema requires it
       },
       include: {
         scenario: {
@@ -126,7 +180,7 @@ export class SessionsService {
                 id: true,
                 firstName: true,
                 lastName: true,
-                specialization: true,
+                specialization: true
               },
             },
           },
@@ -137,40 +191,40 @@ export class SessionsService {
             firstName: true,
             lastName: true,
             email: true,
-          },
-        },
-        supervisor: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
+            role: true
           },
         },
       },
     });
 
-    // Schedule initial events from scenario
-    await this.scheduleInitialEvents(session.id, scenario);
-
-    return {
-      session: session as ScenarioSession,
-      patientState: initialPatientState,
-    };
+    this.logger.log(`Session started successfully: ${session.id}`);
+    return session as SessionWithScenario;
   }
 
   /**
-   * Retrieves a session by ID with proper access control
-   * @param sessionId - Session ID
-   * @param userId - Current user ID
-   * @param userRole - Current user role
-   * @returns Session details
+   * GET SESSION DETAILS WITH COMPLETE RELATED DATA
+   * 
+   * Retrieves a session with all related information including:
+   * - Scenario details and creator information
+   * - Student and supervisor information
+   * - Medical orders and actions
+   * - Conversations and interventions
+   * 
+   * ACCESS CONTROL:
+   * - Student can access their own sessions
+   * - Supervisor can access sessions they supervise
+   * - Admins/Medical Experts can access all sessions
+   * 
+   * @param sessionId - Unique identifier of the session
+   * @param userId - ID of the user requesting access
+   * @param userRole - Role of the user for permission checking
+   * @returns Complete session object with all related data
+   * @throws NotFoundException if session doesn't exist
+   * @throws ForbiddenException if user doesn't have access permissions
    */
-  async getSession(
-    sessionId: string,
-    userId: string,
-    userRole: UserRole
-  ): Promise<ScenarioSession> {
+  async getSession(sessionId: string, userId: string, userRole: UserRole): Promise<SessionWithScenario> {
+    this.logger.log(`Fetching session ${sessionId} for user ${userId}`);
+
     const session = await this.prisma.scenarioSession.findUnique({
       where: { id: sessionId },
       include: {
@@ -181,7 +235,7 @@ export class SessionsService {
                 id: true,
                 firstName: true,
                 lastName: true,
-                specialization: true,
+                specialization: true
               },
             },
           },
@@ -192,6 +246,7 @@ export class SessionsService {
             firstName: true,
             lastName: true,
             email: true,
+            role: true
           },
         },
         supervisor: {
@@ -200,1404 +255,973 @@ export class SessionsService {
             firstName: true,
             lastName: true,
             email: true,
+            role: true
           },
         },
         medicationOrders: {
           include: {
             drug: true,
-            administeredBy: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-              },
-            },
+            student: {
+              select: { firstName: true, lastName: true }
+            }
           },
         },
         procedureOrders: {
           include: {
             procedure: true,
-            performedBy: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-              },
-            },
+            student: {
+              select: { firstName: true, lastName: true }
+            }
           },
         },
         labOrders: {
           include: {
             test: true,
-            collectedBy: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-              },
-            },
+            student: {
+              select: { firstName: true, lastName: true }
+            }
           },
+        },
+        imagingOrders: {
+          include: {
+            study: true,
+            student: {
+              select: { firstName: true, lastName: true }
+            }
+          },
+        },
+        examOrders: {
+          include: {
+            exam: true,
+            student: {
+              select: { firstName: true, lastName: true }
+            }
+          },
+        },
+        actions: {
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+          include: {
+            initiatedBy: {
+              select: { firstName: true, lastName: true }
+            }
+          }
         },
         conversations: {
-          orderBy: { timestamp: "asc" },
-          take: 50, // Limit conversation history
+          orderBy: { timestamp: 'desc' },
+          take: 10,
+          include: {
+            user: {
+              select: { firstName: true, lastName: true }
+            }
+          }
+        },
+        interventions: {
+          orderBy: { createdAt: 'desc' },
+          take: 10,
+          include: {
+            supervisor: {
+              select: { firstName: true, lastName: true }
+            }
+          }
         },
         timeEvents: {
-          where: {
-            virtualTimeScheduled: {
-              lte: new Date(), // Only show past and current events
-            },
-          },
-          orderBy: { virtualTimeScheduled: "asc" },
+          orderBy: { virtualTimeScheduled: 'desc' },
+          take: 10,
         },
       },
     });
 
     if (!session) {
-      throw new NotFoundException(`Session with ID ${sessionId} not found`);
+      this.logger.warn(`Session not found: ${sessionId}`);
+      throw new NotFoundException('Session not found');
     }
 
     // Check access permissions
     this.checkSessionAccess(session, userId, userRole);
 
-    return session as ScenarioSession;
+    this.logger.log(`Session retrieved successfully: ${sessionId}`);
+    return session as SessionWithScenario;
   }
 
   /**
-   * Fast-forwards time in a session
-   * @param sessionId - Session ID
-   * @param fastForwardDto - Fast-forward parameters
-   * @param userId - Current user ID
-   * @returns Updated session state and any triggered events
+ * PERFORM MEDICAL ACTION DURING SESSION
+ * 
+ * Processes a medical intervention or action performed by the student.
+ * Records the action, simulates outcomes, and updates patient state.
+ * 
+ * ACTION PROCESSING STEPS:
+ * 1. Validate session is active
+ * 2. Create action record with initial status
+ * 3. Simulate medical outcome based on action type
+ * 4. Update action with results and feedback
+ * 5. Update session state based on action outcomes
+ * 
+ * @param sessionId - ID of the active session
+ * @param userId - ID of the student performing the action
+ * @param performActionDto - DTO containing action details and parameters
+ * @returns Action record with outcome and session updates
+ * @throws BadRequestException if session is not active
+ */
+  async performAction(
+    sessionId: string,
+    userId: string,
+    performActionDto: PerformActionDto
+  ): Promise<{ action: any; outcome: any }> {
+    this.logger.log(`Performing action in session ${sessionId} by user ${userId}`);
+
+    const session = await this.getSession(sessionId, userId, UserRole.STUDENT);
+
+    if (session.status !== SessionStatus.ACTIVE) {
+      this.logger.warn(`Cannot perform action on inactive session: ${sessionId}`);
+      throw new BadRequestException('Cannot perform actions on inactive session');
+    }
+
+    // Ensure actionDetails is proper JSON
+    const jsonSafeActionDetails = JSON.parse(JSON.stringify(performActionDto.actionDetails));
+
+    // Create action record with initial status
+    const action = await this.prisma.medicalAction.create({
+      data: {
+        sessionId,
+        initiatedById: userId,
+        actionType: performActionDto.actionType,
+        actionDetails: jsonSafeActionDetails, // Now proper JSON
+        priority: performActionDto.priority,
+        status: ActionStatus.IN_PROGRESS,
+        realTimeStarted: new Date(),
+        virtualTimeStarted: session.currentVirtualTime,
+        // Initialize other required fields
+        realTimeRequired: null,
+        virtualTimeRequired: null,
+        realTimeCompleted: null,
+        virtualTimeCompleted: null,
+        expectedOutcome: null,
+        actualOutcome: null,
+        consequenceSeverity: null,
+        expectedCompletionVirtualTime: null,
+        canBeFastForwarded: true,
+        performedCorrectly: null,
+        feedback: null,
+        timePenalty: null,
+      },
+    });
+
+    // Simulate medical outcome based on action type
+    const actionResult = await this.simulateActionOutcome(performActionDto, session);
+
+    // Update action with results and feedback
+    const updatedAction = await this.prisma.medicalAction.update({
+      where: { id: action.id },
+      data: {
+        status: actionResult.success ? ActionStatus.COMPLETED : ActionStatus.FAILED,
+        realTimeCompleted: new Date(),
+        virtualTimeCompleted: session.currentVirtualTime,
+        actualOutcome: JSON.parse(JSON.stringify(actionResult.result)), // Ensure JSON
+        performedCorrectly: actionResult.success,
+        feedback: actionResult.feedback,
+        consequenceSeverity: actionResult.consequenceSeverity,
+      },
+    });
+
+    // Update session state based on action outcomes
+    if (actionResult.sessionStateUpdates) {
+      await this.updateSessionState(sessionId, actionResult.sessionStateUpdates);
+    }
+
+    // Record complications if any occurred
+    if (actionResult.complications && actionResult.complications.length > 0) {
+      await this.recordComplications(sessionId, actionResult.complications);
+    }
+
+    this.logger.log(`Action completed: ${action.id} with success: ${actionResult.success}`);
+
+    return {
+      action: updatedAction,
+      outcome: actionResult,
+    };
+  }
+  /**
+   * FAST FORWARD VIRTUAL TIME IN ACCELERATED MODE
+   * 
+   * Advances virtual time to simulate passage of time for training efficiency.
+   * Processes time-based events like medication effects, lab results, and condition changes.
+   * 
+   * TIME PROCESSING STEPS:
+   * 1. Validate session is in accelerated mode
+   * 2. Calculate real-time equivalent based on acceleration rate
+   * 3. Update session time tracking
+   * 4. Process time-based events and state changes
+   * 5. Return updated session and triggered events
+   * 
+   * @param sessionId - ID of the session to fast forward
+   * @param userId - ID of the student requesting time advance
+   * @param fastForwardDto - DTO containing virtual minutes to advance
+   * @returns Updated session and any triggered time-based events
+   * @throws BadRequestException if session is not in accelerated mode
    */
   async fastForwardTime(
     sessionId: string,
-    fastForwardDto: FastForwardDto,
-    userId: string
+    userId: string,
+    fastForwardDto: FastForwardDto
   ): Promise<{
-    session: ScenarioSession;
-    triggeredEvents: TimeEvent[];
-    interrupted: boolean;
+    session: SessionWithScenario;
+    triggeredEvents: any[];
+    realTimeElapsed: number;
+    virtualTimeElapsed: number;
   }> {
-    const session = await this.prisma.scenarioSession.findUnique({
-      where: { id: sessionId },
-      include: {scenario: true},
-    });
+    this.logger.log(`Fast-forwarding session ${sessionId} by ${fastForwardDto.virtualMinutes} minutes`);
 
-    if (!session) {
-      throw new NotFoundException(`Session with ID ${sessionId} not found`);
+    const session = await this.getSession(sessionId, userId, UserRole.STUDENT);
+
+    // Validate session is in accelerated mode
+    if (session.timeFlowMode !== TimeFlowMode.ACCELERATED) {
+      throw new BadRequestException('Session is not in accelerated time mode');
     }
 
-    // Verify user has access to this session
-    if (session.studentId !== userId && session.supervisorId !== userId) {
-      throw new ForbiddenException("Access denied to this session");
-    }
-
-    // Check if session is active
-    if (session.status !== SessionStatus.ACTIVE) {
-      throw new BadRequestException("Cannot fast-forward inactive session");
-    }
-
-    // Check if there are blocking actions
-    const blockingActions = await this.prisma.medicalAction.count({
-      where: {
-        sessionId,
-        status: ActionStatus.IN_PROGRESS,
-        canBeFastForwarded: false,
-      },
-    });
-
-    if (blockingActions > 0) {
-      throw new BadRequestException(
-        "Cannot fast-forward while actions are in progress"
-      );
-    }
-
-    const currentVirtualTime = new Date(session.currentVirtualTime);
-    const newVirtualTime = new Date(
-      currentVirtualTime.getTime() + fastForwardDto.virtualMinutes * 60000
+    // Calculate real time equivalent based on acceleration rate
+    const realTimeSeconds = this.calculateRealTimeEquivalent(
+      fastForwardDto.virtualMinutes,
+      session.scenario.timeAccelerationRate
     );
 
-    // Check for events that would interrupt fast-forward
-    const interruptingEvents = await this.getInterruptingEvents(
-      sessionId,
-      currentVirtualTime,
-      newVirtualTime,
-      fastForwardDto.stopOnEvents ?? true //reza
-    );
-
-    let finalVirtualTime = newVirtualTime;
-    let interrupted = false;
-
-    if (interruptingEvents.length > 0 && fastForwardDto.stopOnEvents) {
-      // Stop at first interrupting event
-      if (interruptingEvents && interruptingEvents[0])
-        //reza
-        finalVirtualTime = new Date(
-          interruptingEvents[0]!.virtualTimeScheduled
-        );
-      interrupted = true;
-    }
-
-    // Calculate real time elapsed during fast-forward
-    const realTimeElapsed = this.calculateRealTimeElapsed(
-      session.scenario.timeAccelerationRate,
-      fastForwardDto.virtualMinutes
-    );
-
-    // Update session time
+    // Update session time tracking
     const updatedSession = await this.prisma.scenarioSession.update({
       where: { id: sessionId },
       data: {
-        currentVirtualTime: finalVirtualTime,
+        totalVirtualTimeElapsed: session.totalVirtualTimeElapsed + fastForwardDto.virtualMinutes,
+        totalRealTimeElapsed: session.totalRealTimeElapsed + realTimeSeconds,
+        currentVirtualTime: new Date(
+          session.currentVirtualTime.getTime() + fastForwardDto.virtualMinutes * 60000
+        ),
         lastRealTimeUpdate: new Date(),
-        timeFlowMode: interrupted
-          ? TimeFlowMode.PAUSED
-          : TimeFlowMode.ACCELERATED,
-        totalVirtualTimeElapsed:
-          session.totalVirtualTimeElapsed + fastForwardDto.virtualMinutes,
-        totalRealTimeElapsed: session.totalRealTimeElapsed + realTimeElapsed,
       },
       include: {
-        scenario: true,
-        student: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
+        scenario: {
+          include: {
+            creator: {
+              select: { id: true, firstName: true, lastName: true, specialization: true },
+            },
           },
+        },
+        student: {
+          select: { id: true, firstName: true, lastName: true, email: true, role: true },
         },
       },
     });
 
-    // Process events that occurred during fast-forward
-    const triggeredEvents = await this.processTimeEvents(
-      sessionId,
-      currentVirtualTime,
-      finalVirtualTime
-    );
-
-    // Update patient state based on elapsed time and events
-    await this.updatePatientStateFromTime(
+    // Process time-based events (medication effects, lab results, condition changes)
+    const triggeredEvents = await this.processTimeBasedEvents(
       sessionId,
       fastForwardDto.virtualMinutes
     );
 
+    // Update patient state based on time passage
+    await this.updatePatientStateOverTime(sessionId, fastForwardDto.virtualMinutes);
+
+    this.logger.log(`Time fast-forwarded: ${fastForwardDto.virtualMinutes} virtual minutes`);
+
     return {
-      session: updatedSession as ScenarioSession,
+      session: updatedSession as SessionWithScenario,
       triggeredEvents,
-      interrupted,
+      realTimeElapsed: realTimeSeconds,
+      virtualTimeElapsed: fastForwardDto.virtualMinutes,
     };
   }
 
   /**
-   * Asks a question to the virtual patient
-   * @param sessionId - Session ID
-   * @param patientQuestionDto - Question and context
-   * @param userId - User asking the question
-   * @returns Patient response and updated state
+   * ASK PATIENT QUESTION VIA LLM INTEGRATION
+   * 
+   * Uses AI to generate realistic patient responses to student questions.
+   * Maintains conversation context and medical accuracy.
+   * 
+   * CONVERSATION PROCESSING:
+   * 1. Validate session is active
+   * 2. Generate patient response using LLM with medical context
+   * 3. Save conversation for assessment and continuity
+   * 4. Return response with conversation metadata
+   * 
+   * @param sessionId - ID of the active session
+   * @param userId - ID of the student asking the question
+   * @param patientQuestionDto - DTO containing question and context
+   * @returns Patient response with conversation metadata
+   * @throws BadRequestException if session is not active
    */
   async askPatientQuestion(
     sessionId: string,
-    patientQuestionDto: PatientQuestionDto,
-    userId: string
+    userId: string,
+    patientQuestionDto: PatientQuestionDto
   ): Promise<{
+    question: string;
     response: string;
-    emotionalState: EmotionalState;
-    vitalSignChanges?: Partial<VitalSigns>;
     conversationId: string;
+    emotionalContext: EmotionalState;
+    medicalAccuracy?: number;
   }> {
-    const session = await this.prisma.scenarioSession.findUnique({
-      where: { id: sessionId },
-    });
+    this.logger.log(`Processing patient question in session ${sessionId}`);
 
-    if (!session) {
-      throw new NotFoundException(`Session with ID ${sessionId} not found`);
+    const session = await this.getSession(sessionId, userId, UserRole.STUDENT);
+
+    // Validate session is active
+    if (session.status !== SessionStatus.ACTIVE) {
+      throw new BadRequestException('Cannot ask questions in inactive session');
     }
 
-    // Verify user has access to this session
-    if (session.studentId !== userId && session.supervisorId !== userId) {
-      throw new ForbiddenException("Access denied to this session");
-    }
-
-    // Get conversation context
-    const conversationContext = await this.buildConversationContext(sessionId);
+    // Prepare context for LLM
+    const llmContext = {
+      patientState: session.currentPatientState,
+      medicalHistory: session.scenario.pastMedicalHistory,
+      emotionalState: session.currentEmotionalState,
+      chiefComplaint: session.scenario.chiefComplaint,
+      currentSymptoms: session.currentPatientState?.symptoms || [],
+      context: patientQuestionDto.context,
+      conversationHistory: await this.getRecentConversations(sessionId, 5),
+    };
 
     // Generate patient response using LLM
-    const llmResponse = await this.llmService.generatePatientResponse(
+    const patientResponse = await this.llmService.generatePatientResponse(
       patientQuestionDto.question,
-      conversationContext
+      llmContext
     );
 
-    // Save conversation to database
+    // Save conversation for continuity and assessment
     const conversation = await this.prisma.lLMConversation.create({
       data: {
         sessionId,
         userId,
         userMessage: patientQuestionDto.question,
-        patientResponse: llmResponse.processedResponse, //reza llmResponse.responce
-        messageContext: conversationContext,
-        emotionalContext: llmResponse.emotionalState,
+        patientResponse: patientResponse.response,
+        messageContext: patientQuestionDto.context,
+        emotionalContext: session.currentEmotionalState,
         virtualTimestamp: session.currentVirtualTime,
-        medicalAccuracy: llmResponse.medicalAccuracy,
-        appropriateness: llmResponse.educationalValue,
-        realTimeSpent: 10 //reza unknown
+        realTimeSpent: patientResponse.thinkingTime || 5,
+        medicalAccuracy: patientResponse.accuracy,
+        appropriateness: patientResponse.appropriateness,
+        emotionalAppropriateness: patientResponse.emotionalAppropriateness,
+        conversationDepth: await this.calculateConversationDepth(sessionId),
       },
     });
 
-    // Update session emotional state if changed
-    if (llmResponse.emotionalState !== session.currentEmotionalState) {
-      await this.prisma.scenarioSession.update({
-        where: { id: sessionId },
-        data: { currentEmotionalState: llmResponse.emotionalState },
-      });
+    // Update emotional state based on conversation if needed
+    if (patientResponse.emotionalImpact) {
+      await this.updateEmotionalState(sessionId, patientResponse.emotionalImpact);
     }
 
-    // Update vital signs if changed
-    if (llmResponse.vitalSignChanges) {
-      await this.updateVitalSigns(sessionId, llmResponse.vitalSignChanges);
-    }
-
-    // Process any triggered events from the conversation
-    if (llmResponse.triggeredEvents && llmResponse.triggeredEvents.length > 0) {
-      await this.processTriggeredEvents(sessionId, llmResponse.triggeredEvents);
-    }
+    this.logger.log(`Patient question processed: ${conversation.id}`);
 
     return {
-      response: llmResponse.processedResponse, //llmResponse.response.   reza
-      emotionalState: llmResponse.emotionalState,
-      vitalSignChanges: llmResponse.vitalSignChanges,
+      question: patientQuestionDto.question,
+      response: patientResponse.response,
       conversationId: conversation.id,
+      emotionalContext: session.currentEmotionalState,
+      medicalAccuracy: patientResponse.accuracy,
     };
   }
 
   /**
-   * Performs a medical action in the session
-   * @param sessionId - Session ID
-   * @param performActionDto - Action details
-   * @param userId - User performing the action
-   * @returns Action result and updated patient state
+   * END TRAINING SESSION
+   * 
+   * Properly concludes a training session and prepares for assessment.
+   * Updates status, records end time, and allows final feedback.
+   * 
+   * SESSION COMPLETION STEPS:
+   * 1. Validate session can be ended (not already completed/cancelled)
+   * 2. Update session status and end time
+   * 3. Record final feedback if provided
+   * 4. Trigger assessment processing if summative
+   * 
+   * @param sessionId - ID of the session to end
+   * @param userId - ID of the student ending the session
+   * @param endSessionDto - DTO containing optional final feedback
+   * @returns Updated session object
+   * @throws BadRequestException if session is already ended
    */
-  async performAction(
+  async endSession(
     sessionId: string,
-    performActionDto: PerformActionDto,
-    userId: string
-  ): Promise<{
-    action: any;
-    success: boolean;
-    result: any;
-    patientState: PatientState;
-  }> {
-    const session = await this.prisma.scenarioSession.findUnique({
-      where: { id: sessionId },
-    });
+    userId: string,
+    endSessionDto: EndSessionDto
+  ): Promise<SessionWithScenario> {
+    this.logger.log(`Ending session: ${sessionId}`);
 
-    if (!session) {
-      throw new NotFoundException(`Session with ID ${sessionId} not found`);
+    const session = await this.getSession(sessionId, userId, UserRole.STUDENT);
+
+    // Validate session can be ended
+    if (session.status === SessionStatus.COMPLETED || session.status === SessionStatus.CANCELLED) {
+      throw new BadRequestException('Session is already ended');
     }
 
-    // Verify user has access to this session
-    if (session.studentId !== userId && session.supervisorId !== userId) {
-      throw new ForbiddenException("Access denied to this session");
-    }
-
-    // Create medical action record
-    const action = await this.prisma.medicalAction.create({
-      data: {
-        sessionId,
-        userId,
-        actionType: performActionDto.actionType,
-        actionDetails: performActionDto.actionDetails,
-        priority: performActionDto.priority,
-        status: ActionStatus.IN_PROGRESS,
-        realTimeStarted: new Date(),
-        virtualTimeStarted: session.currentVirtualTime,
-        canBeFastForwarded: this.canActionBeFastForwarded(
-          performActionDto.actionType
-        ),
-      },
-    });
-
-    // Process the action based on type
-    const actionResult = await this.processMedicalAction(
-      sessionId,
-      performActionDto,
-      session.currentPatientState as PatientState
-    );
-
-    // Update action with result
-    const updatedAction = await this.prisma.medicalAction.update({
-      where: { id: action.id },
-      data: {
-        status: ActionStatus.COMPLETED,
-        realTimeCompleted: new Date(),
-        virtualTimeCompleted: session.currentVirtualTime,
-        result: actionResult.result,
-        success: actionResult.success,
-        feedback: actionResult.feedback,
-      },
-    });
-
-    // Update patient state
-    const updatedPatientState = await this.updatePatientStateFromAction(
-      sessionId,
-      performActionDto,
-      actionResult
-    );
-
-    return {
-      action: updatedAction,
-      success: actionResult.success,
-      result: actionResult.result,
-      patientState: updatedPatientState,
-    };
-  }
-
-  /**
-   * Pauses an active session
-   * @param sessionId - Session ID
-   * @param userId - User pausing the session
-   * @returns Updated session
-   */
-  async pauseSession(
-    sessionId: string,
-    userId: string
-  ): Promise<ScenarioSession> {
-    const session = await this.prisma.scenarioSession.findUnique({
-      where: { id: sessionId },
-    });
-
-    if (!session) {
-      throw new NotFoundException(`Session with ID ${sessionId} not found`);
-    }
-
-    if (session.studentId !== userId) {
-      throw new ForbiddenException("Only the student can pause their session");
-    }
-
-    if (session.status !== SessionStatus.ACTIVE) {
-      throw new BadRequestException("Session is not active");
-    }
-
-    const updatedSession = await this.prisma.scenarioSession.update({
-      where: { id: sessionId },
-      data: {
-        status: SessionStatus.PAUSED,
-        timeFlowMode: TimeFlowMode.PAUSED,
-      },
-      include: {
-        scenario: true,
-        student: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
-      },
-    });
-
-    return updatedSession as ScenarioSession;
-  }
-
-  /**
-   * Resumes a paused session
-   * @param sessionId - Session ID
-   * @param userId - User resuming the session
-   * @returns Updated session
-   */
-  async resumeSession(
-    sessionId: string,
-    userId: string
-  ): Promise<ScenarioSession> {
-    const session = await this.prisma.scenarioSession.findUnique({
-      where: { id: sessionId },
-    });
-
-    if (!session) {
-      throw new NotFoundException(`Session with ID ${sessionId} not found`);
-    }
-
-    if (session.studentId !== userId) {
-      throw new ForbiddenException("Only the student can resume their session");
-    }
-
-    if (session.status !== SessionStatus.PAUSED) {
-      throw new BadRequestException("Session is not paused");
-    }
-
-    const updatedSession = await this.prisma.scenarioSession.update({
-      where: { id: sessionId },
-      data: {
-        status: SessionStatus.ACTIVE,
-        timeFlowMode: TimeFlowMode.REAL_TIME,
-        lastRealTimeUpdate: new Date(),
-      },
-      include: {
-        scenario: true,
-        student: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
-      },
-    });
-
-    return updatedSession as ScenarioSession;
-  }
-
-  /**
-   * Completes a session and calculates final assessment
-   * @param sessionId - Session ID
-   * @param userId - User completing the session
-   * @returns Completed session with final assessment
-   */
-  async completeSession(
-    sessionId: string,
-    userId: string
-  ): Promise<ScenarioSession> {
-    const session = await this.prisma.scenarioSession.findUnique({
-      where: { id: sessionId },
-    });
-
-    if (!session) {
-      throw new NotFoundException(`Session with ID ${sessionId} not found`);
-    }
-
-    if (session.studentId !== userId) {
-      throw new ForbiddenException(
-        "Only the student can complete their session"
-      );
-    }
-
-    // Calculate final assessment scores
-    const assessment = await this.calculateFinalAssessment(sessionId);
-
+    // Update session with completion data
     const updatedSession = await this.prisma.scenarioSession.update({
       where: { id: sessionId },
       data: {
         status: SessionStatus.COMPLETED,
-        timeFlowMode: TimeFlowMode.PAUSED,
         endTime: new Date(),
-        competencyScores: assessment.competencyScores,
-        overallScore: assessment.overallScore,
-        timeEfficiencyScore: assessment.timeEfficiencyScore,
-        finalFeedback: assessment.feedback,
+        finalFeedback: endSessionDto.finalFeedback,
+        timeFlowMode: TimeFlowMode.PAUSED, // Stop time flow
       },
       include: {
-        scenario: true,
-        student: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
+        scenario: {
+          include: {
+            creator: {
+              select: { id: true, firstName: true, lastName: true, specialization: true },
+            },
           },
         },
+        student: {
+          select: { id: true, firstName: true, lastName: true, email: true, role: true },
+        },
         supervisor: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-          },
+          select: { id: true, firstName: true, lastName: true, email: true, role: true },
         },
       },
     });
 
-    return updatedSession as ScenarioSession;
+    // Trigger assessment processing for summative assessments
+    if (session.assessmentType === AssessmentType.SUMMATIVE) {
+      await this.triggerSummativeAssessment(sessionId);
+    }
+
+    this.logger.log(`Session ended successfully: ${sessionId}`);
+    return updatedSession as SessionWithScenario;
+  }
+
+  /**
+   * PAUSE ACTIVE SESSION
+   * 
+   * Temporarily pauses an active session, freezing virtual time.
+   * Useful for breaks, consultations, or technical issues.
+   * 
+   * @param sessionId - ID of the session to pause
+   * @param userId - ID of the student pausing the session
+   * @returns Updated session object
+   * @throws BadRequestException if session is not active
+   */
+  async pauseSession(sessionId: string, userId: string): Promise<ScenarioSession> {
+    const session = await this.getSession(sessionId, userId, UserRole.STUDENT);
+
+    if (session.status !== SessionStatus.ACTIVE) {
+      throw new BadRequestException('Only active sessions can be paused');
+    }
+
+    this.logger.log(`Pausing session: ${sessionId}`);
+
+    return this.prisma.scenarioSession.update({
+      where: { id: sessionId },
+      data: {
+        status: SessionStatus.PAUSED,
+        lastRealTimeUpdate: new Date(),
+      },
+    });
+  }
+
+  /**
+   * RESUME PAUSED SESSION
+   * 
+   * Resumes a previously paused session, restoring time flow.
+   * Maintains session state and continues from where it left off.
+   * 
+   * @param sessionId - ID of the session to resume
+   * @param userId - ID of the student resuming the session
+   * @returns Updated session object
+   * @throws BadRequestException if session is not paused
+   */
+  async resumeSession(sessionId: string, userId: string): Promise<ScenarioSession> {
+    const session = await this.getSession(sessionId, userId, UserRole.STUDENT);
+
+    if (session.status !== SessionStatus.PAUSED) {
+      throw new BadRequestException('Only paused sessions can be resumed');
+    }
+
+    this.logger.log(`Resuming session: ${sessionId}`);
+
+    return this.prisma.scenarioSession.update({
+      where: { id: sessionId },
+      data: {
+        status: SessionStatus.ACTIVE,
+        lastRealTimeUpdate: new Date(),
+      },
+    });
+  }
+
+  /**
+   * UPDATE TIME FLOW MODE
+   * 
+   * Changes how virtual time progresses in relation to real time.
+   * Allows switching between real-time and accelerated simulation.
+   * 
+   * @param sessionId - ID of the session to update
+   * @param userId - ID of the student updating the mode
+   * @param updateTimeFlowModeDto - DTO containing new time flow mode
+   * @returns Updated session object
+   */
+  async updateTimeFlowMode(
+    sessionId: string,
+    userId: string,
+    updateTimeFlowModeDto: UpdateTimeFlowModeDto
+  ): Promise<ScenarioSession> {
+    const session = await this.getSession(sessionId, userId, UserRole.STUDENT);
+
+    this.logger.log(`Updating time flow mode to ${updateTimeFlowModeDto.timeFlowMode} for session ${sessionId}`);
+
+    return this.prisma.scenarioSession.update({
+      where: { id: sessionId },
+      data: {
+        timeFlowMode: updateTimeFlowModeDto.timeFlowMode,
+        lastRealTimeUpdate: new Date(),
+      },
+    });
+  }
+
+  /**
+   * ADD SUPERVISOR TO SESSION
+   * 
+   * Assigns a supervisor to monitor and guide a training session.
+   * Supervisors can provide interventions and real-time feedback.
+   * 
+   * @param sessionId - ID of the session to supervise
+   * @param userId - ID of the user adding the supervisor (must be student or admin)
+   * @param addSupervisorDto - DTO containing supervisor user ID
+   * @returns Updated session with supervisor information
+   * @throws NotFoundException if supervisor user doesn't exist or isn't qualified
+   */
+  async addSupervisor(
+    sessionId: string,
+    userId: string,
+    addSupervisorDto: AddSupervisorDto
+  ): Promise<SessionWithScenario> {
+    const session = await this.getSession(sessionId, userId, UserRole.STUDENT);
+
+    // Verify supervisor exists and has appropriate role
+    const supervisor = await this.prisma.user.findUnique({
+      where: {
+        id: addSupervisorDto.supervisorId,
+        role: { in: [UserRole.SUPERVISOR, UserRole.MEDICAL_EXPERT, UserRole.ADMIN] },
+        isActive: true,
+      },
+    });
+
+    if (!supervisor) {
+      throw new NotFoundException('Supervisor not found or does not have appropriate role');
+    }
+
+    this.logger.log(`Adding supervisor ${supervisor.id} to session ${sessionId}`);
+
+    const updatedSession = await this.prisma.scenarioSession.update({
+      where: { id: sessionId },
+      data: {
+        supervisorId: addSupervisorDto.supervisorId,
+      },
+      include: {
+        scenario: {
+          include: {
+            creator: {
+              select: { id: true, firstName: true, lastName: true, specialization: true },
+            },
+          },
+        },
+        student: {
+          select: { id: true, firstName: true, lastName: true, email: true, role: true },
+        },
+        supervisor: {
+          select: { id: true, firstName: true, lastName: true, email: true, role: true },
+        },
+      },
+    });
+
+    return updatedSession as SessionWithScenario;
   }
 
   // ========== PRIVATE HELPER METHODS ==========
 
   /**
-   * Creates initial patient state from scenario configuration
+   * CHECK SESSION ACCESS PERMISSIONS
+   * 
+   * Validates that a user has permission to access a specific session.
+   * Access is granted to:
+   * - The student who owns the session
+   * - The supervisor assigned to the session
+   * - Administrators and medical experts
+   * 
+   * @param session - Session object to check access for
+   * @param userId - ID of the user requesting access
+   * @param userRole - Role of the user for permission validation
+   * @throws ForbiddenException if user doesn't have access permissions
    */
-  private createInitialPatientState(scenario: any): PatientState {
-    return {
+  private checkSessionAccess(session: ScenarioSession, userId: string, userRole: UserRole): void {
+    const isStudent = session.studentId === userId;
+    const isSupervisor = session.supervisorId === userId;
+    const isAdmin = userRole === UserRole.ADMIN || userRole === UserRole.MEDICAL_EXPERT;
+
+    if (!isStudent && !isSupervisor && !isAdmin) {
+      this.logger.warn(`Access denied for user ${userId} to session ${session.id}`);
+      throw new ForbiddenException('Access denied to this session');
+    }
+  }
+
+  /**
+   * CREATE INITIAL PATIENT STATE FROM SCENARIO
+   * 
+   * Generates the initial patient state based on scenario configuration.
+   * Sets up vital signs, symptoms, and initial findings.
+   * 
+   * @param scenario - Medical scenario providing initial state configuration
+   * @returns Complete initial patient state object
+   */
+  private createInitialPatientState(scenario: MedicalScenario): any {
+    const initialPatientState = {
       vitalSigns: scenario.initialVitalSigns,
-      symptoms: this.extractInitialSymptoms(scenario.historyOfPresentIllness),
-      mentalStatus: "Alert and oriented",
-      physicalFindings: [],
+      symptoms: [scenario.chiefComplaint],
+      mentalStatus: 'Alert and oriented',
+      physicalFindings: {},
       labResults: [],
       treatmentResponse: [],
+      lastUpdated: new Date().toISOString(),
+      conditionSeverity: 'moderate',
+      stability: 'stable',
     };
+
+    // Ensure we're returning a plain JavaScript object, not a custom type
+    return JSON.parse(JSON.stringify(initialPatientState));
   }
 
   /**
-   * Creates initial competency scores structure
+   * CALCULATE REAL TIME EQUIVALENT FOR VIRTUAL TIME
+   * 
+   * Converts virtual minutes to real seconds based on acceleration rate.
+   * Used for time tracking and session duration calculations.
+   * 
+   * @param virtualMinutes - Number of virtual minutes to convert
+   * @param accelerationRate - Scenario's time acceleration rate (virtual minutes per real minute)
+   * @returns Equivalent real time in seconds
    */
-  private createInitialCompetencyScores() {
+  private calculateRealTimeEquivalent(virtualMinutes: number, accelerationRate: number): number {
+    return Math.floor((virtualMinutes * 60) / accelerationRate);
+  }
+
+  /**
+   * SIMULATE ACTION OUTCOME WITH MEDICAL LOGIC
+   * 
+   * Simulates the outcome of a medical action based on type and context.
+   * In a real implementation, this would include complex medical reasoning.
+   * 
+   * @param actionDto - DTO containing action details
+   * @param session - Current session state for context
+   * @returns Simulated action outcome with success status and effects
+   */
+  private async simulateActionOutcome(
+    actionDto: PerformActionDto,
+    session: SessionWithScenario
+  ): Promise<{
+    success: boolean;
+    result: any;
+    feedback: string;
+    sessionStateUpdates?: any;
+    complications?: any[];
+    consequenceSeverity?: number;
+  }> {
+    // Base success rate with some randomness for simulation
+    const baseSuccessRate = 0.8;
+    const success = Math.random() > (1 - baseSuccessRate);
+
+    // Generate appropriate feedback based on action type and success
+    const feedback = this.generateActionFeedback(actionDto.actionType, success);
+
+    // Simulate some state updates based on action type (ensure JSON safety)
+    const stateUpdates = JSON.parse(JSON.stringify(
+      this.simulateStateUpdates(actionDto, session, success)
+    ));
+
+    // Occasionally simulate complications (ensure JSON safety)
+    const complications = success
+      ? []
+      : JSON.parse(JSON.stringify(this.simulateComplications(actionDto)));
+
     return {
-      diagnostic: { score: 0, feedback: "", evidence: [] },
-      procedural: { score: 0, feedback: "", evidence: [] },
-      communication: { score: 0, feedback: "", evidence: [] },
-      professionalism: { score: 0, feedback: "", evidence: [] },
-      criticalThinking: { score: 0, feedback: "", evidence: [] },
+      success,
+      result: JSON.parse(JSON.stringify({
+        message: success ? 'Action completed successfully' : 'Action encountered issues',
+        details: actionDto.actionDetails,
+        timestamp: new Date().toISOString(),
+      })),
+      feedback,
+      sessionStateUpdates: stateUpdates,
+      complications,
+      consequenceSeverity: success ? 0 : Math.random() * 0.5 + 0.1, // 0.1-0.6 for failures
     };
   }
 
   /**
-   * Schedules initial events from scenario configuration
+   * GENERATE ACTION-SPECIFIC FEEDBACK
    */
-  private async scheduleInitialEvents(sessionId: string, scenario: any) {
-    if (!scenario.scheduledEvents) return;
+  private generateActionFeedback(actionType: string, success: boolean): string {
+    const feedbackMap = {
+      physical_exam: {
+        success: 'Thorough examination with appropriate findings documented',
+        failure: 'Consider more systematic approach to physical examination'
+      },
+      medication: {
+        success: 'Appropriate medication selection and administration',
+        failure: 'Review medication indications and contraindications'
+      },
+      procedure: {
+        success: 'Procedure performed with good technique',
+        failure: 'Consider additional preparation or technique refinement'
+      },
+      default: {
+        success: 'Action performed appropriately',
+        failure: 'Consider alternative approach or additional assessment'
+      }
+    };
 
-    for (const event of scenario.scheduledEvents) {
-      // Parse virtual time and convert to actual datetime
-      const [hours, minutes] = event.virtualTime.split(":").map(Number);
-      const virtualTime = new Date();
-      virtualTime.setHours(hours, minutes, 0, 0);
+    const feedback = feedbackMap[actionType] || feedbackMap.default;
+    return success ? feedback.success : feedback.failure;
+  }
 
+  /**
+   * SIMULATE STATE UPDATES BASED ON ACTION
+   */
+  private simulateStateUpdates(
+    actionDto: PerformActionDto,
+    session: SessionWithScenario,
+    success: boolean
+  ): any {
+    const updates: any = {
+      lastAction: actionDto.actionType,
+      lastActionTime: new Date(),
+    };
+
+    // Simulate some condition improvements for successful actions
+    if (success) {
+      if (actionDto.actionType === 'medication' && actionDto.actionDetails.medicationType === 'analgesic') {
+        updates.painLevel = 'decreased';
+      }
+    }
+
+    return updates;
+  }
+
+  /**
+   * SIMULATE COMPLICATIONS FOR FAILED ACTIONS
+   */
+  private simulateComplications(actionDto: PerformActionDto): any[] {
+    const complications = [];
+
+    if (Math.random() > 0.7) { // 30% chance of complication
+      complications.push({
+        type: 'minor_complication',
+        description: 'Minor issue encountered during procedure',
+        severity: 'low',
+        requiredAction: 'Monitor and document'
+      });
+    }
+
+    return complications;
+  }
+
+  /**
+   * UPDATE SESSION STATE WITH NEW DATA
+   */
+  private async updateSessionState(sessionId: string, updates: any): Promise<void> {
+    const session = await this.prisma.scenarioSession.findUnique({
+      where: { id: sessionId },
+      select: { currentPatientState: true },
+    });
+
+    if (!session) return;
+
+    const currentState = session.currentPatientState as any;
+
+    // Ensure updates are proper JSON by serializing/deserializing
+    const jsonSafeUpdates = JSON.parse(JSON.stringify(updates));
+    const updatedState = { ...currentState, ...jsonSafeUpdates };
+
+    await this.prisma.scenarioSession.update({
+      where: { id: sessionId },
+      data: {
+        currentPatientState: updatedState,
+      },
+    });
+  }
+
+  /**
+   * PROCESS TIME-BASED EVENTS DURING FAST FORWARD
+   */
+  private async processTimeBasedEvents(sessionId: string, virtualMinutes: number): Promise<any[]> {
+    const events = [];
+
+    // Simulate lab results becoming available
+    if (virtualMinutes > 30 && Math.random() > 0.7) {
+      events.push({
+        type: 'lab_result_ready',
+        message: 'Laboratory test results are now available for review',
+        virtualTime: new Date(),
+        priority: EventPriority.MEDIUM,
+      });
+    }
+
+    // Simulate medication effects
+    if (virtualMinutes > 15 && Math.random() > 0.6) {
+      events.push({
+        type: 'medication_effect',
+        message: 'Administered medication is taking effect',
+        virtualTime: new Date(),
+        priority: EventPriority.LOW,
+      });
+    }
+
+    // Simulate patient condition changes
+    if (virtualMinutes > 45 && Math.random() > 0.8) {
+      events.push({
+        type: 'patient_condition_change',
+        message: 'Patient condition has changed - requires reassessment',
+        virtualTime: new Date(),
+        priority: EventPriority.HIGH,
+      });
+    }
+
+    // Create time events in database
+    for (const event of events) {
       await this.prisma.timeEvent.create({
         data: {
           sessionId,
-          eventType: event.eventType,
-          eventData: event.details,
-          virtualTimeScheduled: virtualTime,
-          requiresAttention: event.requiresAttention || false,
-          isComplication: event.eventType.includes("complication"),
-        },
-      });
-    }
-  }
-
-  /**
-   * Checks if user has access to a session
-   */
-  private checkSessionAccess(
-    session: any,
-    userId: string,
-    userRole: UserRole
-  ): void {
-    // Admin can access everything
-    if (userRole === UserRole.ADMIN) return;
-
-    // Student can access their own sessions
-    if (session.studentId === userId) return;
-
-    // Supervisor can access sessions they supervise
-    if (session.supervisorId === userId) return;
-
-    // Medical experts can access sessions from their institution
-    if (userRole === UserRole.MEDICAL_EXPERT) {
-      // Additional institution checks would go here
-      return;
-    }
-
-    throw new ForbiddenException("Access denied to this session");
-  }
-
-  /**
-   * Gets events that would interrupt fast-forward
-   */
-  private async getInterruptingEvents(
-    sessionId: string,
-    fromTime: Date,
-    toTime: Date,
-    stopOnEvents: boolean
-  ): Promise<TimeEvent[]> {
-    if (!stopOnEvents) return [];
-
-    return this.prisma.timeEvent.findMany({
-      where: {
-        sessionId,
-        virtualTimeScheduled: {
-          gt: fromTime,
-          lte: toTime,
-        },
-        requiresAttention: true,
-        acknowledgedAt: null,
-      },
-      orderBy: { virtualTimeScheduled: "asc" },
-    }) as Promise<TimeEvent[]>;
-  }
-
-  /**
-   * Calculates real time elapsed based on acceleration rate
-   */
-  private calculateRealTimeElapsed(
-    accelerationRate: number,
-    virtualMinutes: number
-  ): number {
-    return (virtualMinutes / accelerationRate) * 60; // Convert to seconds
-  }
-
-  /**
-   * Processes time events that occurred during a time period
-   */
-  private async processTimeEvents(
-    sessionId: string,
-    fromTime: Date,
-    toTime: Date
-  ): Promise<TimeEvent[]> {
-    const events = await this.prisma.timeEvent.findMany({
-      where: {
-        sessionId,
-        virtualTimeScheduled: {
-          gte: fromTime,
-          lte: toTime,
-        },
-        virtualTimeTriggered: null,
-      },
-    });
-
-    const triggeredEvents: TimeEvent[] = [];
-
-    for (const event of events) {
-      const triggeredEvent = await this.prisma.timeEvent.update({
-        where: { id: event.id },
-        data: {
+          eventType: event.type,
+          eventData: { message: event.message },
+          virtualTimeScheduled: event.virtualTime,
           virtualTimeTriggered: new Date(),
           realTimeTriggered: new Date(),
-        },
-      });
-
-      triggeredEvents.push(triggeredEvent as TimeEvent);
-
-      // Process event consequences
-      await this.processEventConsequences(sessionId, event);
-    }
-
-    return triggeredEvents;
-  }
-
-  /**
-   * Builds conversation context for LLM
-   */
-  private async buildConversationContext(sessionId: string): Promise<any> {
-    const session = await this.prisma.scenarioSession.findUnique({
-      where: { id: sessionId },
-      include: {
-        scenario: true,
-        conversations: {
-          orderBy: { timestamp: "desc" },
-          take: 10, // Last 10 messages for context
-        },
-      },
-    });
-
-    if (!session) throw new NotFoundException("Session not found");
-
-    return {
-      patientState: session.currentPatientState,
-      medicalHistory: session.scenario.pastMedicalHistory,
-      currentSymptoms: (session.currentPatientState as any).symptoms || [],
-      vitalSigns: session.latestVitalSigns,
-      emotionalState: session.currentEmotionalState,
-      painLevel: (session.latestVitalSigns as any).painLevel || 0,
-      conversationHistory: session.conversations.map(
-        (conv: { userMessage: any; timestamp: any }) => ({
-          role: "user",
-          content: conv.userMessage,
-          timestamp: conv.timestamp,
-        })
-      ),
-      educationalObjectives: session.scenario.learningObjectives,
-    };
-  }
-
-  /**
-   * Processes medical actions and returns results
-   */
-  private async processMedicalAction(
-    sessionId: string,
-    action: PerformActionDto,
-    patientState: PatientState
-  ): Promise<{ success: boolean; result: any; feedback?: string }> {
-    // This would contain complex medical logic for different action types
-    // For now, return a simplified implementation
-
-    switch (action.actionType) {
-      case "examination":
-        return this.processExaminationAction(action, patientState);
-      case "medication":
-        return this.processMedicationAction(action, patientState);
-      case "procedure":
-        return this.processProcedureAction(action, patientState);
-      case "diagnostic":
-        return this.processDiagnosticAction(action, patientState);
-      default:
-        return {
-          success: false,
-          result: null,
-          feedback: "Unknown action type",
-        };
-    }
-  }
-
-  /**
-   * Processes examination actions
-   */
-  private processExaminationAction(
-    action: PerformActionDto,
-    patientState: PatientState
-  ): { success: boolean; result: any; feedback?: string } {
-    // Simplified examination logic
-    const examinationType = action.actionDetails.procedure;
-
-    // Mock examination results based on patient state
-    const result = {
-      findings: `Normal ${examinationType} examination`,
-      abnormalities: [],
-      notes: "Examination performed correctly",
-    };
-
-    return {
-      success: true,
-      result,
-      feedback: "Examination completed successfully",
-    };
-  }
-
-  /**
-   * Processes medication actions
-   */
-  private processMedicationAction(
-    action: PerformActionDto,
-    patientState: PatientState
-  ): { success: boolean; result: any; feedback?: string } {
-    // Simplified medication logic
-    const medication = action.actionDetails.medication;
-
-    const result = {
-      medication,
-      dosage: action.actionDetails.dosage,
-      administrationTime: new Date(),
-      expectedEffects: "Pain relief in 15-30 minutes",
-    };
-
-    return {
-      success: true,
-      result,
-      feedback: "Medication administered correctly",
-    };
-  }
-
-  /**
-   * Checks if an action type can be fast-forwarded
-   */
-  private canActionBeFastForwarded(actionType: string): boolean {
-    const nonFastForwardableActions = [
-      "complex_procedure",
-      "surgery",
-      "critical_care",
-    ];
-
-    return !nonFastForwardableActions.includes(actionType);
-  }
-
-  /**
-   * Extracts initial symptoms from history of present illness
-   */
-  private extractInitialSymptoms(history: string): string[] {
-    // Simplified symptom extraction - in real implementation, this would be more sophisticated
-    const commonSymptoms = [
-      "pain",
-      "fever",
-      "cough",
-      "shortness of breath",
-      "nausea",
-      "vomiting",
-      "headache",
-      "dizziness",
-      "fatigue",
-      "weakness",
-    ];
-
-    return commonSymptoms.filter((symptom) =>
-      history.toLowerCase().includes(symptom)
-    );
-  }
-
-  /**
-   * Updates patient state based on elapsed time
-   */
-  private async updatePatientStateFromTime(
-    sessionId: string,
-    virtualMinutes: number
-  ): Promise<void> {
-    // This would contain complex physiological modeling
-    // For now, it's a placeholder implementation
-    const session = await this.prisma.scenarioSession.findUnique({
-      where: { id: sessionId },
-    });
-
-    if (!session) return;
-
-    // Update vital signs based on disease progression
-    const updatedVitalSigns = this.simulateVitalSignChanges(
-      session.latestVitalSigns as VitalSigns,
-      virtualMinutes,
-      session.scenarioId // Use scenario for progression model
-    );
-
-    await this.prisma.scenarioSession.update({
-      where: { id: sessionId },
-      data: {
-        latestVitalSigns: updatedVitalSigns,
-        currentPatientState: {
-          ...session.currentPatientState,
-          vitalSigns: updatedVitalSigns,
-        },
-      },
-    });
-  }
-
-  /**
-   * Simulates vital sign changes over time
-   */
-  private simulateVitalSignChanges(
-    currentVitalSigns: VitalSigns,
-    minutesElapsed: number,
-    scenarioId: string
-  ): VitalSigns {
-    // Simplified simulation - in real implementation, this would use the physiology model
-    return {
-      ...currentVitalSigns,
-      heartRate: Math.max(
-        60,
-        currentVitalSigns.heartRate + minutesElapsed * 0.1
-      ),
-      // More complex simulations would go here
-    };
-  }
-
-  /**
-   * Updates patient state based on action results
-   */
-  private async updatePatientStateFromAction(
-    sessionId: string,
-    action: PerformActionDto,
-    actionResult: any
-  ): Promise<PatientState> {
-    const session = await this.prisma.scenarioSession.findUnique({
-      where: { id: sessionId },
-    });
-
-    if (!session) {
-      throw new NotFoundException("Session not found");
-    }
-
-    const currentState = session.currentPatientState as PatientState;
-
-    // Update state based on action type and result
-    // This would contain complex medical logic
-
-    const updatedState = {
-      ...currentState,
-      // Update based on action
-    };
-
-    await this.prisma.scenarioSession.update({
-      where: { id: sessionId },
-      data: { currentPatientState: updatedState },
-    });
-
-    return updatedState;
-  }
-
-  /**
-   * Updates vital signs in the session
-   */
-  private async updateVitalSigns(
-    sessionId: string,
-    changes: Partial<VitalSigns>
-  ): Promise<void> {
-    const session = await this.prisma.scenarioSession.findUnique({
-      where: { id: sessionId },
-    });
-
-    if (!session) return;
-
-    const currentVitalSigns = session.latestVitalSigns as VitalSigns;
-    const updatedVitalSigns = { ...currentVitalSigns, ...changes };
-
-    await this.prisma.scenarioSession.update({
-      where: { id: sessionId },
-      data: {
-        latestVitalSigns: updatedVitalSigns,
-        currentPatientState: {
-          ...session.currentPatientState,
-          vitalSigns: updatedVitalSigns,
-        },
-      },
-    });
-  }
-
-  /**
-   * Processes events triggered by conversations
-   */
-  private async processTriggeredEvents(
-    sessionId: string,
-    eventTypes: string[]
-  ): Promise<void> {
-    for (const eventType of eventTypes) {
-      await this.prisma.timeEvent.create({
-        data: {
-          sessionId,
-          eventType,
-          eventData: { triggeredBy: "conversation" },
-          virtualTimeScheduled: new Date(),
-          requiresAttention: true,
-          isComplication: eventType.includes("complication"),
+          requiresAttention: event.priority === EventPriority.HIGH,
+          severity: event.priority,
         },
       });
     }
+
+    return events;
   }
 
   /**
-   * Processes event consequences
+   * UPDATE PATIENT STATE OVER TIME
    */
-  private async processEventConsequences(
-    sessionId: string,
-    event: any
-  ): Promise<void> {
-    // Handle different event types and their consequences
-    switch (event.eventType) {
-      case "lab_result_ready":
-        await this.processLabResult(sessionId, event);
-        break;
-      case "medication_effect":
-        await this.processMedicationEffect(sessionId, event);
-        break;
-      case "patient_deterioration":
-        await this.processPatientDeterioration(sessionId, event);
-        break;
-      default:
-        // Handle other event types
-        break;
-    }
-  }
-
-  /**
-   * Processes lab result events
-   */
-  private async processLabResult(sessionId: string, event: any): Promise<void> {
-    // Update patient state with lab results
+  // In a real implementation, this would include complex physiological modeling
+  // For now, we'll simulate some basic changes
+  private async updatePatientStateOverTime(sessionId: string, virtualMinutes: number): Promise<void> {
     const session = await this.prisma.scenarioSession.findUnique({
       where: { id: sessionId },
+      select: { currentPatientState: true, scenarioId: true },
     });
 
     if (!session) return;
 
-    const currentState = session.currentPatientState as PatientState;
-    const updatedLabResults = [
-      ...currentState.labResults,
-      {
-        test: event.eventData.test,
-        value: event.eventData.value,
-        units: event.eventData.units,
-        normalRange: event.eventData.normalRange,
-        isCritical: event.eventData.isCritical,
-        timestamp: new Date(),
-      },
-    ];
+    const currentState = session.currentPatientState as any;
+    const updatedState = JSON.parse(JSON.stringify(currentState));
+
+    // Simulate some time-based changes
+    if (virtualMinutes > 60) {
+      // Patient might become more distressed over time if untreated
+      if (Math.random() > 0.5) {
+        updatedState.conditionSeverity = 'worsening';
+      }
+    }
 
     await this.prisma.scenarioSession.update({
       where: { id: sessionId },
       data: {
-        currentPatientState: {
-          ...currentState,
-          labResults: updatedLabResults,
-        },
+        currentPatientState: updatedState,
       },
     });
   }
 
   /**
-   * Processes medication effect events
+   * GET RECENT CONVERSATIONS FOR CONTEXT
    */
-  private async processMedicationEffect(
-    sessionId: string,
-    event: any
-  ): Promise<void> {
-    // Update vital signs based on medication effects
-    const changes = event.eventData.vitalSignChanges;
-    if (changes) {
-      await this.updateVitalSigns(sessionId, changes);
-    }
+  private async getRecentConversations(sessionId: string, limit: number): Promise<any[]> {
+    const conversations = await this.prisma.lLMConversation.findMany({
+      where: { sessionId },
+      orderBy: { timestamp: 'desc' },
+      take: limit,
+      select: {
+        userMessage: true,
+        patientResponse: true,
+        emotionalContext: true,
+        timestamp: true,
+      },
+    });
+
+    return conversations.reverse(); // Return in chronological order
   }
 
   /**
-   * Processes patient deterioration events
+   * CALCULATE CONVERSATION DEPTH FOR LLM CONTEXT
    */
-  private async processPatientDeterioration(
-    sessionId: string,
-    event: any
-  ): Promise<void> {
-    // Update patient state for deterioration
+  private async calculateConversationDepth(sessionId: string): Promise<number> {
+    const conversationCount = await this.prisma.lLMConversation.count({
+      where: { sessionId },
+    });
+
+    return Math.min(conversationCount + 1, 10); // Cap at 10 for context management
+  }
+
+  /**
+   * UPDATE PATIENT EMOTIONAL STATE
+   */
+  private async updateEmotionalState(sessionId: string, emotionalImpact: any): Promise<void> {
+    // Simple emotional state transition logic
+    // In real implementation, this would be more sophisticated
     const session = await this.prisma.scenarioSession.findUnique({
       where: { id: sessionId },
+      select: { currentEmotionalState: true },
     });
 
     if (!session) return;
 
+    let newEmotionalState = session.currentEmotionalState;
+
+    // Simple state transitions based on impact
+    if (emotionalImpact.intensity > 0.7) {
+      if (emotionalImpact.positive) {
+        newEmotionalState = EmotionalState.CALM;
+      } else {
+        newEmotionalState = EmotionalState.ANXIOUS;
+      }
+    }
+
     await this.prisma.scenarioSession.update({
       where: { id: sessionId },
       data: {
-        complicationsEncountered: [
-          ...session.complicationsEncountered,
-          event.eventData.complication,
-        ],
+        currentEmotionalState: newEmotionalState,
       },
     });
-
-    // Update vital signs for deterioration
-    const deteriorationChanges = event.eventData.vitalSignChanges;
-    if (deteriorationChanges) {
-      await this.updateVitalSigns(sessionId, deteriorationChanges);
-    }
   }
 
   /**
-   * Processes procedure actions
+   * RECORD COMPLICATIONS IN SESSION
    */
-  private processProcedureAction(
-    action: PerformActionDto,
-    patientState: PatientState
-  ): { success: boolean; result: any; feedback?: string } {
-    const procedure = action.actionDetails.procedure;
-
-    const result = {
-      procedure,
-      findings: "Procedure completed successfully",
-      complications: [],
-      duration: "15 minutes",
-    };
-
-    return {
-      success: true,
-      result,
-      feedback: "Procedure performed correctly",
-    };
-  }
-
-  /**
-   * Processes diagnostic actions
-   */
-  private processDiagnosticAction(
-    action: PerformActionDto,
-    patientState: PatientState
-  ): { success: boolean; result: any; feedback?: string } {
-    const test = action.actionDetails.test;
-
-    const result = {
-      test,
-      result: "Within normal limits",
-      interpretation: "No significant abnormalities detected",
-      recommendations: "Continue with current management",
-    };
-
-    return {
-      success: true,
-      result,
-      feedback: "Diagnostic test ordered successfully",
-    };
-  }
-
-  /**
-   * Calculates final assessment for completed session
-   */
-  private async calculateFinalAssessment(sessionId: string): Promise<{
-    competencyScores: any;
-    overallScore: number;
-    timeEfficiencyScore: number;
-    feedback: string;
-  }> {
-    // This would contain complex assessment logic
-    // For now, return mock assessment
-
-    return {
-      competencyScores: {
-        diagnostic: {
-          score: 0.85,
-          feedback: "Good diagnostic reasoning",
-          evidence: [],
-        },
-        procedural: {
-          score: 0.78,
-          feedback: "Adequate procedural skills",
-          evidence: [],
-        },
-        communication: {
-          score: 0.92,
-          feedback: "Excellent patient communication",
-          evidence: [],
-        },
-        professionalism: {
-          score: 0.88,
-          feedback: "Professional conduct maintained",
-          evidence: [],
-        },
-        criticalThinking: {
-          score: 0.81,
-          feedback: "Good problem-solving approach",
-          evidence: [],
-        },
-      },
-      overallScore: 0.85,
-      timeEfficiencyScore: 0.79,
-      feedback:
-        "Good overall performance with room for improvement in procedural efficiency.",
-    };
-  }
-
-  private calculateDuration(startTime: Date, endTime: Date): number {
-    return (endTime.getTime() - startTime.getTime()) / 1000; // in seconds
-  }
-
-  private formatDuration(seconds: number): string {
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    return `${hours}h ${minutes}m`;
-  }
-
-  async getUserSessionAnalytics(userId: string) {
-  const sessions = await this.prisma.scenarioSession.findMany({
-    where: {
-      studentId: userId,
-      status: 'COMPLETED',
-      endTime: { not: null },
-    },
-    include: {
-      scenario: {
-        select: {
-          title: true,
-          difficultyLevel: true,
-          expectedDuration: true,
-          medicalCondition: true,
-        },
-      },
-    },
-  });
-
-  // Calculate additional metrics
-  const totalDuration = sessions.reduce((total:any, session:any) => 
-    total + this.calculateDuration(session.startTime, session.endTime!), 0
-  );
-
-  const averageScore = sessions.reduce((total:any, session:any) => 
-    total + (session.overallScore || 0), 0
-  ) / sessions.length;
-
-  const averageEfficiency = sessions.reduce((total:any, session:any) => {
-    const expected = session.scenario.expectedDuration || 3600;
-    const actual = this.calculateDuration(session.startTime, session.endTime!);
-    return total + (expected / Math.max(actual, 1));
-  }, 0) / sessions.length;
-
-  return {
-    summary: {
-      totalSessions: sessions.length,
-      totalTimeSpent: totalDuration,
-      formattedTimeSpent: this.formatDuration(totalDuration),
-      averageSessionDuration: totalDuration / sessions.length,
-      averageScore: averageScore || 0,
-      averageEfficiency: averageEfficiency || 0,
-    },
-    byDifficulty: this.groupSessionsByDifficulty(sessions),
-    completionTrend: this.analyzeCompletionTrend(sessions),
-    recentActivity: {
-      lastSession: sessions.length > 0 ? sessions[sessions.length - 1] : null,
-      sessionsThisMonth: sessions.filter((s:any) => 
-        this.isThisMonth(s.endTime!)
-      ).length,
-      favoriteScenario: this.findMostFrequentScenario(sessions),
-    }
-  };
-}
-
-private isThisMonth(date: Date): boolean {
-  const now = new Date();
-  const target = new Date(date);
-  return now.getMonth() === target.getMonth() && 
-         now.getFullYear() === target.getFullYear();
-}
-
-private findMostFrequentScenario(sessions: any[]): string | null {
-  if (sessions.length === 0) return null;
-  
-  const scenarioCount = sessions.reduce((acc, session) => {
-    const scenarioName = session.scenario.title;
-    acc[scenarioName] = (acc[scenarioName] || 0) + 1;
-    return acc;
-  }, {} as any);
-
-  return Object.keys(scenarioCount).reduce((a, b) => 
-    scenarioCount[a] > scenarioCount[b] ? a : b
-  );
-}
-
-private groupSessionsByDifficulty(sessions: any[]): any {
-  const groups = sessions.reduce((acc, session) => {
-    const difficulty = session.scenario.difficultyLevel || 'unknown';
-    if (!acc[difficulty]) {
-      acc[difficulty] = {
-        count: 0,
-        totalDuration: 0,
-        averageScore: 0,
-        sessions: []
-      };
-    }
-    
-    const duration = this.calculateDuration(session.startTime, session.endTime!);
-    acc[difficulty].count++;
-    acc[difficulty].totalDuration += duration;
-    acc[difficulty].averageScore += session.overallScore || 0;
-    acc[difficulty].sessions.push({
-      id: session.id,
-      title: session.scenario.title,
-      duration,
-      score: session.overallScore
+  private async recordComplications(sessionId: string, complications: any[]): Promise<void> {
+    const session = await this.prisma.scenarioSession.findUnique({
+      where: { id: sessionId },
+      select: { complicationsEncountered: true },
     });
-    
-    return acc;
-  }, {} as any);
 
-  // Calculate averages
-  Object.keys(groups).forEach(difficulty => {
-    groups[difficulty].averageDuration = groups[difficulty].totalDuration / groups[difficulty].count;
-    groups[difficulty].averageScore = groups[difficulty].averageScore / groups[difficulty].count;
-  });
+    if (!session) return;
 
-  return groups;
-}
+    const currentComplications = session.complicationsEncountered;
+    const newComplications = complications.map(c => c.type);
 
-private analyzeCompletionTrend(sessions: any[]): any {
-  if (sessions.length === 0) {
-    return { trend: 'no_data', message: 'No completed sessions available' };
+    await this.prisma.scenarioSession.update({
+      where: { id: sessionId },
+      data: {
+        complicationsEncountered: [...currentComplications, ...newComplications],
+      },
+    });
   }
 
-  // Group by month
-  const monthlyData = sessions.reduce((acc, session) => {
-    const monthKey = this.getMonthKey(session.endTime!);
-    if (!acc[monthKey]) {
-      acc[monthKey] = {
-        month: monthKey,
-        count: 0,
-        totalDuration: 0,
-        totalScore: 0,
-        sessions: []
-      };
-    }
-    
-    const duration = this.calculateDuration(session.startTime, session.endTime!);
-    acc[monthKey].count++;
-    acc[monthKey].totalDuration += duration;
-    acc[monthKey].totalScore += session.overallScore || 0;
-    acc[monthKey].sessions.push(session.id);
-    
-    return acc;
-  }, {} as any);
+  /**
+   * TRIGGER SUMMATIVE ASSESSMENT PROCESSING
+   */
+  private async triggerSummativeAssessment(sessionId: string): Promise<void> {
+    this.logger.log(`Triggering summative assessment for session: ${sessionId}`);
 
-  // Convert to array and sort by date
-  const monthlyArray = Object.values(monthlyData).sort((a: any, b: any) => 
-    new Date(a.month).getTime() - new Date(b.month).getTime()
-  );
-
-  // Calculate averages and trends
-  monthlyArray.forEach((month: any) => {
-    month.averageDuration = month.totalDuration / month.count;
-    month.averageScore = month.totalScore / month.count;
-  });
-
-  // Analyze trends
-  const trend = this.calculateCompletionTrend(monthlyArray);
-  
-  return {
-    monthlyData: monthlyArray,
-    trend,
-    summary: this.generateTrendSummary(trend, monthlyArray)
-  };
-}
-
-private getMonthKey(date: Date): string {
-  const d = new Date(date);
-  return `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, '0')}`;
-}
-
-private calculateCompletionTrend(monthlyData: any[]): any {
-  if (monthlyData.length < 2) {
-    return { direction: 'insufficient_data', strength: 0 };
+    // In a real implementation, this would trigger complex assessment logic
+    // For now, we'll just log the event
+    // Assessment would analyze actions, decisions, timing, and outcomes
   }
-
-  // Calculate session count trend
-  const sessionCounts = monthlyData.map((m: any) => m.count);
-  const sessionTrend = this.calculateLinearTrend(sessionCounts);
-
-  // Calculate score trend
-  const scores = monthlyData.map((m: any) => m.averageScore);
-  const scoreTrend = this.calculateLinearTrend(scores);
-
-  // Calculate duration trend (shorter durations = more efficient)
-  const durations = monthlyData.map((m: any) => m.averageDuration);
-  const durationTrend = this.calculateLinearTrend(durations);
-
-  return {
-    sessionCount: {
-      direction: sessionTrend.slope > 0 ? 'increasing' : sessionTrend.slope < 0 ? 'decreasing' : 'stable',
-      strength: Math.abs(sessionTrend.slope),
-      confidence: sessionTrend.confidence
-    },
-    performance: {
-      direction: scoreTrend.slope > 0 ? 'improving' : scoreTrend.slope < 0 ? 'declining' : 'stable',
-      strength: Math.abs(scoreTrend.slope),
-      confidence: scoreTrend.confidence
-    },
-    efficiency: {
-      direction: durationTrend.slope < 0 ? 'improving' : durationTrend.slope > 0 ? 'declining' : 'stable',
-      strength: Math.abs(durationTrend.slope),
-      confidence: durationTrend.confidence
-    }
-  };
-}
-
-private calculateLinearTrend(data: number[]): { slope: number; confidence: number } {
-  if (data.length < 2) return { slope: 0, confidence: 0 };
-
-  const n = data.length;
-  const x = Array.from({ length: n }, (_, i) => i);
-  
-  const sumX = x.reduce((a, b) => a + b, 0);
-  const sumY = data.reduce((a, b) => a + b, 0);
-  const sumXY = x.reduce((a, _, i) => a + x[i]! * data[i]!, 0);
-  const sumXX = x.reduce((a, b) => a + b * b, 0);
-  
-  const slope = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
-  
-  // Simple confidence calculation based on data consistency
-  const mean = sumY / n;
-  const variance = data.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / n;
-  const confidence = Math.max(0, 1 - Math.sqrt(variance) / (mean || 1));
-  
-  return { slope, confidence };
-}
-
-private generateTrendSummary(trend: any, monthlyData: any[]): string {
-  const lastMonth = monthlyData[monthlyData.length - 1];
-  const firstMonth = monthlyData[0];
-
-  const summaries = [];
-
-  if (trend.sessionCount.direction === 'increasing') {
-    summaries.push(`Completed ${lastMonth.count} sessions this month (up from ${firstMonth.count})`);
-  } else if (trend.sessionCount.direction === 'decreasing') {
-    summaries.push(`Session completion decreased to ${lastMonth.count} this month`);
-  }
-
-  if (trend.performance.direction === 'improving') {
-    const improvement = ((lastMonth.averageScore - firstMonth.averageScore) * 100).toFixed(1);
-    summaries.push(`Performance improved by ${improvement}%`);
-  }
-
-  if (trend.efficiency.direction === 'improving') {
-    const timeSaved = firstMonth.averageDuration - lastMonth.averageDuration;
-    summaries.push(`Became ${this.formatDuration(timeSaved)} more efficient per session`);
-  }
-
-  return summaries.join('. ') || 'Consistent performance maintained';
-}
-
-
 }

@@ -2,7 +2,7 @@
 import { Module } from '@nestjs/common';
 import { AssessmentService } from './assessment.service';
 import { AssessmentController } from './assessment.controller';
-import { DatabaseModule as PrismaModule } from '../prisma/prisma.module'; //reza
+import {  PrismaModule } from '../prisma/prisma.module'; //reza
 import { LLMModule } from '../llm/llm.module';
 import {
   AssessmentEngineService,
