@@ -102,7 +102,7 @@ export class PerformActionDto {
    */
   @IsOptional()
   @IsEnum(EventPriority)
-  priority?: EventPriority;
+  priority: EventPriority;
 
   constructor(data: Partial<PerformActionDto> = {}) {
     this.actionType = data.actionType || '';
@@ -209,7 +209,7 @@ export class EndSessionDto {
   finalFeedback?: string;
 
   constructor(data: Partial<EndSessionDto> = {}) {
-    this.finalFeedback = data.finalFeedback;
+    this.finalFeedback = data.finalFeedback ?? "";
   }
 }
 
